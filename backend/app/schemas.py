@@ -40,3 +40,10 @@ class PaymentDecision(BaseModel):
     amount: int
     currency: str
     approval_id: str | None = None
+
+
+class ApprovalDecision(BaseModel):
+    id: str
+    status: str
+    payment_id: str
+    approved_by: str | None = None

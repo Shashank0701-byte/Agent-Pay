@@ -16,6 +16,8 @@ venv/
 build/
 dist/
 *.egg-info/
+*.db
+*.sqlite3
 
 # OS/editor
 .DS_Store

@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "AgentPay"
     environment: str = "development"
-    database_url: str = "postgresql+psycopg://postgres:postgres@db:5432/agentpay"
+    database_url: str = "sqlite:///./agentpay.db"
     secret_key: str = "change-this-secret-key"
 
     model_config = SettingsConfigDict(
