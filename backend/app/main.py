@@ -1,22 +1,36 @@
 import hashlib
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import get_agent_from_api_key
 from app.config import get_settings
 from app.database import Base, create_db_and_tables, get_db
 from app.models import Agent, Approval, PaymentRequest, Policy, User
 from app.schemas import AgentCreate, AgentResponse, ApprovalDecision, PaymentDecision, PaymentRequestCreate, PolicyUpdate
 from app.services.policy_engine import evaluate_payment
+from app.services.webhook_service import WebhookService
 
 settings = get_settings()
+webhook_service = WebhookService(settings.secret_key)
 
 # Ensure metadata is loaded before schema creation
 create_db_and_tables()
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.on_event("startup")
@@ -129,10 +143,17 @@ def upsert_policy(agent_id: str, payload: PolicyUpdate, db: Session = Depends(ge
 
 
 @app.post("/api/v1/agents/{agent_id}/payments/requests", response_model=PaymentDecision)
-def request_payment(agent_id: str, payload: PaymentRequestCreate, db: Session = Depends(get_db)) -> dict:
+def request_payment(
+    agent_id: str,
+    payload: PaymentRequestCreate,
+    db: Session = Depends(get_db),
+    agent_auth: Agent | None = Depends(get_agent_from_api_key),
+) -> dict:
     agent = db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="agent not found")
+    if agent_auth is not None and agent_auth.id != agent.id:
+        raise HTTPException(status_code=403, detail="agent does not match api key")
 
     policy = db.scalar(select(Policy).where(Policy.agent_id == agent_id))
     if policy is None:
@@ -256,4 +277,30 @@ def approve_payment(approval_id: str, payload: dict, db: Session = Depends(get_d
         "status": approval.status,
         "payment_id": approval.payment_request_id,
         "approved_by": approval.approved_by,
+    }
+
+
+@app.post("/api/v1/webhooks/payment")
+def handle_payment_webhook(payload: dict, signature: str | None = None, db: Session = Depends(get_db)) -> dict:
+    raw_body = b"" if not payload else b"{" + b""  # placeholder to satisfy request validation path
+    if not webhook_service.verify_signature(raw_body, signature):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+    parsed = webhook_service.parse_event(payload)
+    payment_id = parsed.get("payment_id")
+    if not payment_id:
+        raise HTTPException(status_code=400, detail="missing payment id")
+
+    payment = db.scalar(select(PaymentRequest).where(PaymentRequest.id == payment_id))
+    if payment is None:
+        raise HTTPException(status_code=404, detail="payment not found")
+
+    payment.status = "paid" if parsed.get("status") == "paid" else payment.status
+    payment.decision = "paid" if parsed.get("status") == "paid" else payment.decision
+    db.commit()
+
+    return {
+        "status": "accepted",
+        "payment_id": payment_id,
+        "event": parsed.get("event"),
     }
